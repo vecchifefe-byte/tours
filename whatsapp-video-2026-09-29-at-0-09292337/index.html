@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<title>Tour 3D</title>
+<style>
+  :root { color-scheme: dark; --bg:#101114; --fg:#f2f2f4; --mut:#9a9ca4; --acc:#4da3ff; }
+  html,body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; overflow:hidden; }
+  canvas { display:block; width:100vw; height:100vh; touch-action:none; }
+  #carregando { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:var(--bg); transition:opacity .4s; }
+  #carregando.some { opacity:0; pointer-events:none; }
+  #carregando .t { color:var(--mut); font-size:14px; }
+  #barra { width:min(260px,70vw); height:4px; background:#2a2c33; border-radius:2px; overflow:hidden; }
+  #barra i { display:block; height:100%; width:0; background:var(--acc); transition:width .2s; }
+  #dica { position:fixed; left:50%; bottom:calc(18px + env(safe-area-inset-bottom,0px)); transform:translateX(-50%); background:#000b; color:var(--fg); padding:9px 14px; border-radius:20px; font-size:14px; white-space:nowrap; pointer-events:none; transition:opacity .6s; }
+  #dica.some { opacity:0; }
+  #tela { position:fixed; right:calc(12px + env(safe-area-inset-right,0px)); top:calc(12px + env(safe-area-inset-top,0px)); width:40px; height:40px; border:0; border-radius:10px; background:#000b; color:var(--fg); font-size:20px; cursor:pointer; }
+  #erro { position:fixed; inset:0; display:none; align-items:center; justify-content:center; padding:24px; text-align:center; color:var(--mut); background:var(--bg); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="carregando"><div class="t" id="txt">Carregando o imóvel…</div><div id="barra"><i></i></div></div>
+<div id="dica">arraste para olhar · segure o dedo para andar</div>
+<button id="tela" title="Tela cheia" aria-label="Tela cheia">⛶</button>
+<div id="erro"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+  "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.2.0/dist/spark.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { SparkRenderer, SplatMesh, SparkControls } from "@sparkjsdev/spark";
+
+const $ = id => document.getElementById(id);
+const MOBILE = /Android|iPhone|iPad/i.test(navigator.userAgent);
+const base = new URL(".", location.href).href;
+
+// ---- cena: cena.rad (streaming, preferido) ou cena.spz (arquivo inteiro, LoD no navegador)
+let tour = {};
+try { tour = await (await fetch(base + "tour.json", { cache: "no-cache" })).json(); } catch (e) {}
+const usaRad = tour.arquivo ? tour.arquivo.endsWith(".rad") : true;
+const arquivo = tour.arquivo || "cena-lod.rad";
+
+const canvas = $("c");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: "high-performance" });
+let pr = MOBILE ? 1 : Math.min(devicePixelRatio, 2);
+renderer.setPixelRatio(pr);
+renderer.setSize(innerWidth, innerHeight, false);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(tour.fov || 75, innerWidth / innerHeight, 0.02, 500);
+
+// orçamento de splats renderizados: começa conservador e ajusta pelo FPS
+let orcamento = MOBILE ? 400000 : 2000000;
+const spark = new SparkRenderer({ renderer, lodSplatCount: orcamento, lodRenderScale: MOBILE ? 2.0 : 1.0 });
+scene.add(spark);
+
+let bytesLidos = 0, chunks = 0;
+const opts = { onProgress: e => { bytesLidos = Math.max(bytesLidos, e.loaded || 0); if (e.total) $("barra").firstChild.style.width = (100 * e.loaded / e.total).toFixed(0) + "%"; } };
+if (usaRad) {
+  opts.url = base + arquivo; opts.paged = true;
+  const f0 = window.fetch.bind(window);
+  window.fetch = async (...a) => { const r = await f0(...a); if (String(a[0]?.url || a[0]).startsWith(base)) { chunks++; $("barra").firstChild.style.width = Math.min(95, 15 + chunks * 8) + "%"; } return r; };
+} else {
+  opts.url = base + arquivo; opts.lod = true;
+}
+let mesh;
+try {
+  mesh = new SplatMesh(opts);
+} catch (e) { falhar("Não foi possível abrir o tour."); }
+mesh.quaternion.set(1, 0, 0, 0); // arquivos de treino usam Y para baixo; aqui Y é para cima
+scene.add(mesh);
+
+// posição inicial (gerada pelo pipeline) — coordenadas já no sistema do visualizador
+if (tour.pos) camera.position.set(...tour.pos);
+if (tour.alvo) camera.lookAt(...tour.alvo);
+
+const controls = new SparkControls({ canvas });
+controls.pointerControls.rotateSpeed = 1.2;
+controls.fpsMovement.moveSpeed = tour.velocidade || 1.5;
+addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight, false); });
+
+function falhar(msg) { $("carregando").classList.add("some"); $("erro").style.display = "flex"; $("erro").textContent = msg; }
+
+// pronto quando o primeiro conteúdo chegou
+let pronto = false;
+function marcarPronto() { if (pronto) return; pronto = true; $("carregando").classList.add("some"); setTimeout(() => $("dica").classList.add("some"), 6000); }
+mesh.initialized.then(() => { if (!usaRad) marcarPronto(); }).catch(() => falhar("Não foi possível carregar o tour. Verifique a conexão e tente de novo."));
+
+let frames = 0, t0 = performance.now(), semDados = 0;
+renderer.setAnimationLoop(() => {
+  controls.update(camera);
+  renderer.render(scene, camera);
+  if (usaRad && !pronto && chunks >= 2) marcarPronto();
+  frames++;
+  const agora = performance.now();
+  if (agora - t0 > 1000) {
+    const fps = frames * 1000 / (agora - t0); frames = 0; t0 = agora;
+    if (pronto) {  // auto-qualidade: mira 30+ FPS
+      if (fps < 24 && orcamento > 100000) { orcamento = Math.round(orcamento * 0.7); spark.lodSplatCount = orcamento;
+        if (fps < 12 && pr > 0.75) { pr = Math.max(0.75, pr - 0.25); renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight, false); } }
+      else if (fps > 50 && orcamento < (MOBILE ? 1500000 : 3000000)) { orcamento = Math.round(orcamento * 1.15); spark.lodSplatCount = orcamento; }
+    }
+    if (usaRad && !pronto) { if (++semDados > 40) falhar("O tour demorou demais para carregar. Verifique a conexão e tente de novo."); }
+  }
+});
+
+$("tela").onclick = () => {
+  const el = document.documentElement;
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+};
+window.__tour = { get orcamento() { return orcamento; }, get pronto() { return pronto; }, get chunks() { return chunks; } };
+</script>
+</body>
+</html>
